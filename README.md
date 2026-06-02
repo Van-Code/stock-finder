@@ -1,72 +1,115 @@
-# Stock Finder
+# SEC Insider Signal Scanner
 
-Collects posts from r/wallstreetbets via the Reddit API for stock ticker analysis.
+**Research tool only. Not financial advice.**
 
-## Phase 1 — Reddit Data Collection
+Fetches recent SEC Form 4 filings from EDGAR, parses open-market insider purchases, and saves results to a local JSON file.
 
-Fetches posts from `hot`, `new`, and `top (24h)` feeds and saves them to `./data/posts.json`.
+---
+
+## Phase 1 — Form 4 Collection
+
+### What it does
+
+1. Queries the [EDGAR EFTS search API](https://efts.sec.gov/LATEST/search-index) for recent Form 4 filings
+2. Downloads each filing's XML document
+3. Parses `nonDerivativeTable` transactions
+4. Keeps only open-market purchases (`transactionCode = "P"`, positive shares and price)
+5. Prints a console table and saves to `./data/form4-purchases.json`
 
 ### Setup
 
-**1. Create a Reddit app**
-
-Go to https://www.reddit.com/prefs/apps and create a "script" type app. Note the client ID (under the app name) and client secret.
-
-**2. Configure credentials**
-
-```bash
-cp .env.example .env
-```
-
-Fill in `.env`:
-
-```
-REDDIT_CLIENT_ID=your_client_id
-REDDIT_CLIENT_SECRET=your_client_secret
-REDDIT_USERNAME=your_reddit_username
-REDDIT_PASSWORD=your_reddit_password
-REDDIT_USER_AGENT=stock-finder/1.0 by your_reddit_username
-```
-
-**3. Install dependencies**
+**1. Install dependencies**
 
 ```bash
 npm install
 ```
 
-**4. Run**
+**2. Configure environment**
 
 ```bash
-# Development (no build step)
-npm run dev
-
-# Production
-npm run build && npm start
+cp .env.example .env
 ```
+
+Edit `.env` and set your email address. The SEC requires a descriptive `User-Agent` with contact info for EDGAR API access ([SEC policy](https://www.sec.gov/os/accessing-edgar-data)).
+
+```
+SEC_CONTACT_EMAIL=you@example.com
+```
+
+**3. Run**
+
+```bash
+npm run scan
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `SEC_CONTACT_EMAIL` | required | Contact email for SEC User-Agent header |
+| `DAYS_BACK` | `2` | Calendar days to look back for filings |
+| `PAGE_SIZE` | `40` | Filings per run (max 40, EFTS limit) |
 
 ### Output
 
-Posts are saved to `./data/posts.json`. Each entry contains:
+Results are saved to `./data/form4-purchases.json`.
+
+Each record contains:
 
 | Field | Description |
 |---|---|
-| `title` | Post title |
-| `selftext` | Post body text |
-| `score` | Net upvotes |
-| `upvote_ratio` | Ratio of upvotes to total votes |
-| `author` | Reddit username |
-| `created_utc` | Unix timestamp of creation |
-| `num_comments` | Number of comments |
-| `permalink` | Relative URL path to the post |
-| `source` | Feed it was collected from (`hot`, `new`, `top`) |
+| `ticker` | Issuer trading symbol |
+| `companyName` | Issuer company name |
+| `insiderName` | Reporting owner name |
+| `insiderTitle` | Officer title or role |
+| `transactionDate` | Date of the transaction |
+| `shares` | Number of shares purchased |
+| `price` | Price per share |
+| `totalValue` | `shares × price` |
+| `filingUrl` | Direct URL to the Form 4 XML on EDGAR |
 
-Duplicate posts (appearing in multiple feeds) are deduplicated by permalink.
-
-### Expected output
+### Example output
 
 ```
-Authenticating with Reddit...
-Fetching posts from r/wallstreetbets...
-Fetched 247 posts.
-Saved to posts.json.
+═══════════════════════════════════════════════════════
+  SEC Form 4 Insider Purchase Scanner  — Phase 1
+  Research tool only. Not financial advice.
+═══════════════════════════════════════════════════════
+
+[1/3] Fetching recent Form 4 filings (last 2 day(s))…
+      Querying EDGAR EFTS: 2025-05-31 → 2025-06-02 (up to 40 filings)
+      Found 40 Form 4 filings.
+
+[2/3] Downloading and parsing XML documents…
+  [1/40] 0001234567-25-000001  ✓ 1 purchase(s) found
+  [2/40] 0009876543-25-000012  – no open-market purchases
+  ...
+
+[3/3] Saving results…
+
+  ── Open-Market Insider Purchases ─────────────────────
+  ┌─────────┬──────────────────────┬──────────────────┬───────┬────────────┬───────────┬─────────┬────────────┐
+  │ ticker  │ company              │ insider          │ title │ date       │ shares    │ price   │ total      │
+  ├─────────┼──────────────────────┼──────────────────┼───────┼────────────┼───────────┼─────────┼────────────┤
+  │ ACME    │ Acme Corp            │ Jane Smith       │ CEO   │ 2025-06-01 │ 10,000    │ $52.30  │ $523,000   │
+  └─────────┴──────────────────────┴──────────────────┴───────┴────────────┴───────────┴─────────┴────────────┘
+
+Fetched 40 Form 4 filings.
+Saved to form4-purchases.json.
 ```
+
+### Rate limiting
+
+Requests are spaced ≥ 125 ms apart (~8 req/s), under the SEC's stated limit of 10 req/s. Do not run multiple instances simultaneously.
+
+### SEC Fair Access
+
+This tool follows SEC EDGAR fair-access expectations:
+- Descriptive `User-Agent` with contact email on every request
+- Rate-limited to ≤ 10 req/s
+- Only fetches data needed for the scan
+- No aggressive or bulk scraping
+
+---
+
+*Data sourced from [SEC EDGAR](https://www.sec.gov/cgi-bin/browse-edgar). For informational and research purposes only.*

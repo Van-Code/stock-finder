@@ -1,17 +1,16 @@
 {
-  "name": "stock-finder",
+  "name": "sec-insider-scanner",
   "version": "1.0.0",
-  "description": "Reddit WSB post collector for stock ticker analysis",
+  "description": "SEC Form 4 insider purchase scanner — research tool, not financial advice",
   "type": "module",
-  "main": "dist/index.js",
   "scripts": {
+    "scan": "tsx src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "start": "node dist/index.js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^5.8.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.2",

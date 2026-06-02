@@ -1,41 +1,63 @@
-export interface RedditPost {
-  title: string;
-  selftext: string;
-  score: number;
-  upvote_ratio: number;
-  author: string;
-  created_utc: number;
-  num_comments: number;
-  permalink: string;
-  source: "hot" | "new" | "top";
+// ── EDGAR EFTS search response ──────────────────────────────────────────────
+
+export interface EftsHitSource {
+  accession_no: string;   // e.g. "0001234567-25-000001"
+  entity_id: string;      // filer CIK (numeric string, may have leading zeros)
+  entity_name: string;    // reporting owner name from EDGAR
+  filed_at: string;       // ISO 8601 timestamp
+  period_of_report: string;
+  form_type: string;
 }
 
-export interface RedditTokenResponse {
-  access_token: string;
-  token_type: string;
-  expires_in: number;
-  scope: string;
+export interface EftsHit {
+  _id: string;
+  _source: EftsHitSource;
 }
 
-export interface RedditListingChild {
-  kind: string;
-  data: {
-    title: string;
-    selftext: string;
-    score: number;
-    upvote_ratio: number;
-    author: string;
-    created_utc: number;
-    num_comments: number;
-    permalink: string;
+export interface EftsResponse {
+  hits: {
+    total: { value: number; relation: string };
+    hits: EftsHit[];
   };
 }
 
-export interface RedditListing {
-  kind: string;
-  data: {
-    children: RedditListingChild[];
-    after: string | null;
-    before: string | null;
-  };
+// ── Filing metadata (internal use) ──────────────────────────────────────────
+
+export interface Form4FilingMeta {
+  accessionNo: string;  // with dashes
+  cik: string;          // numeric, no leading zeros
+  entityName: string;
+  filedAt: string;
+}
+
+// ── Parsed Form 4 transaction data ──────────────────────────────────────────
+
+export interface NonDerivativeTransaction {
+  transactionCode: string;
+  transactionDate: string;
+  transactionShares: number;
+  transactionPricePerShare: number;
+  acquiredDisposedCode: string;
+}
+
+export interface ParsedForm4 {
+  issuerName: string;
+  issuerTicker: string;
+  reportingOwnerName: string;
+  reportingOwnerTitle: string;
+  transactions: NonDerivativeTransaction[];
+}
+
+// ── Output record ────────────────────────────────────────────────────────────
+
+export interface InsiderPurchase {
+  ticker: string;
+  companyName: string;
+  insiderName: string;
+  insiderTitle: string;
+  transactionDate: string;
+  shares: number;
+  price: number;
+  totalValue: number;
+  filingUrl: string;
 }
