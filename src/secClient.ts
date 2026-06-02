@@ -1,6 +1,19 @@
 import "dotenv/config";
 import { EftsResponse, Form4FilingMeta } from "./types.js";
 
+// ── Yahoo Finance rate limiter (separate from SEC limiter) ───────────────────
+const YF_INTERVAL_MS = 300; // ~3 req/s — polite for unofficial endpoint
+let lastYfRequestAt = 0;
+
+async function yfFetch(url: string): Promise<Response> {
+  const gap = Date.now() - lastYfRequestAt;
+  if (gap < YF_INTERVAL_MS) await sleep(YF_INTERVAL_MS - gap);
+  lastYfRequestAt = Date.now();
+  return fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; research bot)" },
+  });
+}
+
 // SEC EDGAR endpoints
 const EFTS_BASE = "https://efts.sec.gov/LATEST/search-index";
 const EDGAR_ARCHIVE = "https://www.sec.gov/Archives/edgar/data";
@@ -40,6 +53,34 @@ async function rateLimitedFetch(url: string, accept = "application/json"): Promi
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Fetch the fractional price change for a ticker over the prior 90 days using
+ * Yahoo Finance's public chart API.  Returns null on any error or if the ticker
+ * is unknown — callers should treat null as "data unavailable".
+ */
+export async function fetchPriceChange90d(ticker: string): Promise<number | null> {
+  if (!ticker || ticker === "N/A") return null;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=3mo`;
+  try {
+    const res = await yfFetch(url);
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      chart?: { result?: Array<{ indicators?: { quote?: Array<{ close?: number[] }> } }> };
+    };
+    const closes = body?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+    if (!closes || closes.length < 2) return null;
+
+    // First and last non-null closes
+    const first = closes.find((c) => c != null);
+    const last = [...closes].reverse().find((c) => c != null);
+    if (first == null || last == null || first === 0) return null;
+
+    return (last - first) / first;
+  } catch {
+    return null;
+  }
 }
 
 // Strip leading zeros to match EDGAR archive folder naming

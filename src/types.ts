@@ -60,4 +60,11 @@ export interface InsiderPurchase {
   price: number;
   totalValue: number;
   filingUrl: string;
+  transactionCode: string;
+}
+
+export interface ScoredPurchase extends InsiderPurchase {
+  signalScore: number;
+  verdict: string;
+  scoreBreakdown: string[];
 }
