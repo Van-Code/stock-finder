@@ -2,44 +2,44 @@ import "dotenv/config";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { fetchRecentForm4Filings, fetchFilingXml } from "./secClient.js";
+import { fetchRecentForm4Filings, fetchFilingXml, fetchPriceChange90d } from "./secClient.js";
 import { parseForm4Xml } from "./parser.js";
-import { InsiderPurchase } from "./types.js";
+import { scoreAllPurchases, PriceChangeMap } from "./scoring.js";
+import { InsiderPurchase, ScoredPurchase } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, "../data");
 const OUTPUT_FILE = path.join(DATA_DIR, "form4-purchases.json");
 
-// Configurable via env
 const DAYS_BACK = parseInt(process.env.DAYS_BACK ?? "2", 10);
 const PAGE_SIZE = Math.min(parseInt(process.env.PAGE_SIZE ?? "40", 10), 40);
+// Set FETCH_PRICE_DATA=false in .env to skip Yahoo Finance price checks
+const FETCH_PRICE_DATA = process.env.FETCH_PRICE_DATA !== "false";
 
 async function main() {
   console.log("═══════════════════════════════════════════════════════");
-  console.log("  SEC Form 4 Insider Purchase Scanner  — Phase 1");
+  console.log("  SEC Form 4 Insider Signal Scanner");
   console.log("  Research tool only. Not financial advice.");
   console.log("═══════════════════════════════════════════════════════\n");
 
-  // 1. Fetch recent Form 4 filing metadata from EDGAR EFTS
-  console.log(`[1/3] Fetching recent Form 4 filings (last ${DAYS_BACK} day(s))…`);
+  // ── 1. Fetch Form 4 filing metadata ───────────────────────────────────────
+  console.log(`[1/4] Fetching recent Form 4 filings (last ${DAYS_BACK} day(s))…`);
   const filings = await fetchRecentForm4Filings(DAYS_BACK, PAGE_SIZE);
   console.log(`      Found ${filings.length} Form 4 filings.\n`);
 
   if (filings.length === 0) {
-    console.log("No filings found for the given date range. Try increasing DAYS_BACK.");
+    console.log("No filings found. Try increasing DAYS_BACK in .env.");
     process.exit(0);
   }
 
-  // 2. Download and parse each filing XML
-  console.log(`[2/3] Downloading and parsing XML documents…`);
+  // ── 2. Download and parse XML ─────────────────────────────────────────────
+  console.log(`[2/4] Downloading and parsing filing XML…`);
   const purchases: InsiderPurchase[] = [];
   let parsed = 0;
   let skipped = 0;
 
   for (const filing of filings) {
-    process.stdout.write(
-      `  [${parsed + skipped + 1}/${filings.length}] ${filing.accessionNo}  `
-    );
+    process.stdout.write(`  [${parsed + skipped + 1}/${filings.length}] ${filing.accessionNo}  `);
 
     const result = await fetchFilingXml(filing.cik, filing.accessionNo);
     if (!result) {
@@ -55,7 +55,6 @@ async function main() {
       continue;
     }
 
-    // Filter: open-market purchases only
     const openMarketBuys = form4.transactions.filter(
       (txn) =>
         txn.transactionCode === "P" &&
@@ -80,10 +79,11 @@ async function main() {
         price: txn.transactionPricePerShare,
         totalValue: Math.round(txn.transactionShares * txn.transactionPricePerShare * 100) / 100,
         filingUrl: result.filingUrl,
+        transactionCode: txn.transactionCode,
       });
     }
 
-    process.stdout.write(`✓ ${openMarketBuys.length} purchase(s) found\n`);
+    process.stdout.write(`✓ ${openMarketBuys.length} purchase(s)\n`);
     parsed++;
   }
 
@@ -91,34 +91,65 @@ async function main() {
     `\n      Parsed: ${parsed}  |  Skipped: ${skipped}  |  Open-market purchases: ${purchases.length}\n`
   );
 
-  // 3. Save and display results
-  console.log(`[3/3] Saving results…`);
+  if (purchases.length === 0) {
+    console.log("No open-market insider purchases found. Try increasing DAYS_BACK.\n");
+    process.exit(0);
+  }
+
+  // ── 3. Fetch 90-day price changes ─────────────────────────────────────────
+  console.log(`[3/4] Fetching price data…`);
+  const priceChanges: PriceChangeMap = {};
+
+  if (FETCH_PRICE_DATA) {
+    const uniqueTickers = [
+      ...new Set(purchases.map((p) => p.ticker).filter((t) => t !== "N/A")),
+    ];
+    console.log(`      Checking ${uniqueTickers.length} ticker(s) via Yahoo Finance…`);
+    for (const ticker of uniqueTickers) {
+      const change = await fetchPriceChange90d(ticker);
+      priceChanges[ticker] = change;
+      const label =
+        change === null ? "no data" : `${change >= 0 ? "+" : ""}${(change * 100).toFixed(1)}%`;
+      console.log(`      ${ticker.padEnd(8)} ${label}`);
+    }
+  } else {
+    console.log("      Skipped (FETCH_PRICE_DATA=false).");
+  }
+
+  // ── 4. Score, save, display ───────────────────────────────────────────────
+  console.log(`\n[4/4] Scoring and saving…`);
+
+  const scored: ScoredPurchase[] = scoreAllPurchases(purchases, priceChanges)
+    .sort((a, b) => b.signalScore - a.signalScore);
 
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(purchases, null, 2), "utf-8");
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(scored, null, 2), "utf-8");
 
-  if (purchases.length === 0) {
-    console.log("\n  No open-market insider purchases found in this window.");
-    console.log("  Try increasing DAYS_BACK in .env.\n");
-  } else {
-    console.log(`\n  ── Open-Market Insider Purchases ─────────────────────`);
-    console.table(
-      purchases.map((p) => ({
-        ticker: p.ticker,
-        company: p.companyName.slice(0, 24),
-        insider: p.insiderName.slice(0, 22),
-        title: p.insiderTitle.slice(0, 20),
-        date: p.transactionDate,
-        shares: p.shares.toLocaleString(),
-        price: `$${p.price.toFixed(2)}`,
-        total: `$${p.totalValue.toLocaleString()}`,
-      }))
-    );
+  console.log(`\n  ── Insider Signal Scores ──────────────────────────────────────────`);
+  console.table(
+    scored.map((p) => ({
+      ticker:      p.ticker,
+      insider:     p.insiderName.slice(0, 22),
+      title:       p.insiderTitle.slice(0, 20),
+      totalValue:  `$${p.totalValue.toLocaleString()}`,
+      score:       p.signalScore,
+      verdict:     p.verdict,
+    }))
+  );
+
+  const strong = scored.filter((p) => p.signalScore >= 80);
+  if (strong.length > 0) {
+    console.log(`\n  ── Strong Signals (score ≥ 80) ────────────────────────────────────`);
+    for (const p of strong) {
+      console.log(`\n  ${p.ticker}  ${p.insiderName}  (${p.insiderTitle})`);
+      console.log(`  Score: ${p.signalScore}  |  ${p.verdict}`);
+      for (const line of p.scoreBreakdown) console.log(`    ${line}`);
+      console.log(`  Filing: ${p.filingUrl}`);
+    }
   }
 
   console.log(`\nFetched ${filings.length} Form 4 filings.`);
-  console.log(`Saved to form4-purchases.json.`);
-  console.log(`Output: ${OUTPUT_FILE}\n`);
+  console.log(`Saved to form4-purchases.json.\n`);
 }
 
 main().catch((err) => {
