@@ -6,10 +6,12 @@ import { fetchRecentForm4Filings, fetchFilingXml, fetchPriceChange90d, fetchRece
 import { parseForm4Xml } from "./parser.js";
 import { parseActivistDoc } from "./activistParser.js";
 import { scoreAllPurchases, buildClusterSignals, scoreActivistFiling, PriceChangeMap } from "./scoring.js";
+import { generateReport } from "./reportGenerator.js";
 import { InsiderPurchase, ScoredPurchase, ActivistSignal } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, "../data");
+const REPORTS_DIR = path.resolve(__dirname, "../reports");
 const OUTPUT_FILE = path.join(DATA_DIR, "form4-purchases.json");
 const CLUSTER_FILE = path.join(DATA_DIR, "cluster-signals.json");
 const ACTIVIST_FILE = path.join(DATA_DIR, "activist-signals.json");
@@ -248,10 +250,27 @@ async function main() {
     console.log(`\n  No activist filings found. Try increasing ACTIVIST_DAYS_BACK in .env.`);
   }
 
+  // ── Generate markdown report ──────────────────────────────────────────────
+  const today = new Date().toISOString().slice(0, 10);
+  const reportMd = generateReport({
+    date: today,
+    scored,
+    clusters,
+    activist: sortedActivist,
+    priceChanges,
+    daysBack: DAYS_BACK,
+    activistDaysBack: ACTIVIST_DAYS_BACK,
+  });
+
+  if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  const reportFile = path.join(REPORTS_DIR, `${today}-sec-signals.md`);
+  fs.writeFileSync(reportFile, reportMd, "utf-8");
+
   console.log(`\nFetched ${filings.length} Form 4 filings.`);
   console.log(`Saved to form4-purchases.json.`);
   console.log(`Saved to cluster-signals.json.`);
-  console.log(`Saved to activist-signals.json.\n`);
+  console.log(`Saved to activist-signals.json.`);
+  console.log(`Report: reports/${today}-sec-signals.md\n`);
 }
 
 main().catch((err) => {
