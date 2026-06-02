@@ -4,12 +4,13 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { fetchRecentForm4Filings, fetchFilingXml, fetchPriceChange90d } from "./secClient.js";
 import { parseForm4Xml } from "./parser.js";
-import { scoreAllPurchases, PriceChangeMap } from "./scoring.js";
+import { scoreAllPurchases, buildClusterSignals, PriceChangeMap } from "./scoring.js";
 import { InsiderPurchase, ScoredPurchase } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, "../data");
 const OUTPUT_FILE = path.join(DATA_DIR, "form4-purchases.json");
+const CLUSTER_FILE = path.join(DATA_DIR, "cluster-signals.json");
 
 const DAYS_BACK = parseInt(process.env.DAYS_BACK ?? "2", 10);
 const PAGE_SIZE = Math.min(parseInt(process.env.PAGE_SIZE ?? "40", 10), 40);
@@ -116,31 +117,68 @@ async function main() {
     console.log("      Skipped (FETCH_PRICE_DATA=false).");
   }
 
-  // ── 4. Score, save, display ───────────────────────────────────────────────
-  console.log(`\n[4/4] Scoring and saving…`);
+  // ── 4. Score, cluster, save, display ─────────────────────────────────────
+  console.log(`\n[4/4] Scoring, clustering, and saving…`);
 
   const scored: ScoredPurchase[] = scoreAllPurchases(purchases, priceChanges)
     .sort((a, b) => b.signalScore - a.signalScore);
 
+  const clusters = buildClusterSignals(purchases, priceChanges);
+
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(scored, null, 2), "utf-8");
+  fs.writeFileSync(CLUSTER_FILE, JSON.stringify(clusters, null, 2), "utf-8");
 
+  // ── Per-purchase table ────────────────────────────────────────────────────
   console.log(`\n  ── Insider Signal Scores ──────────────────────────────────────────`);
   console.table(
     scored.map((p) => ({
-      ticker:      p.ticker,
-      insider:     p.insiderName.slice(0, 22),
-      title:       p.insiderTitle.slice(0, 20),
-      totalValue:  `$${p.totalValue.toLocaleString()}`,
-      score:       p.signalScore,
-      verdict:     p.verdict,
+      ticker:     p.ticker,
+      insider:    p.insiderName.slice(0, 22),
+      title:      p.insiderTitle.slice(0, 20),
+      totalValue: `$${p.totalValue.toLocaleString()}`,
+      score:      p.signalScore,
+      verdict:    p.verdict,
     }))
   );
 
-  const strong = scored.filter((p) => p.signalScore >= 80);
-  if (strong.length > 0) {
-    console.log(`\n  ── Strong Signals (score ≥ 80) ────────────────────────────────────`);
-    for (const p of strong) {
+  // ── Cluster table ─────────────────────────────────────────────────────────
+  if (clusters.length > 0) {
+    console.log(`\n  ── Cluster Signals (${clusters.length} ticker(s) with 2+ insiders within 14d) ──`);
+    console.table(
+      clusters.map((c) => ({
+        ticker:             c.ticker,
+        uniqueInsiders:     c.uniqueInsiders,
+        totalPurchaseValue: `$${c.totalPurchaseValue.toLocaleString()}`,
+        ceoOrCfoBought:     c.ceoOrCfoBought ? "YES" : "no",
+        clusterScore:       c.clusterScore,
+        verdict:            c.verdict,
+      }))
+    );
+
+    // Detail block for strong clusters
+    const strongClusters = clusters.filter((c) => c.clusterScore >= 80);
+    if (strongClusters.length > 0) {
+      console.log(`\n  ── Strong Cluster Details (score ≥ 80) ───────────────────────────`);
+      for (const c of strongClusters) {
+        console.log(`\n  ${c.ticker}  ${c.companyName}`);
+        console.log(`  Score: ${c.clusterScore}  |  ${c.verdict}`);
+        console.log(`  Insiders (${c.uniqueInsiders}): ${c.insiderNames.join(", ")}`);
+        console.log(`  Window: ${c.earliestDate} → ${c.latestDate} (${c.windowDays}d)`);
+        console.log(`  Avg purchase: $${c.avgPurchaseSize.toLocaleString()}`);
+        for (const line of c.scoreBreakdown) console.log(`    ${line}`);
+      }
+    }
+  } else {
+    console.log(`\n  No clusters found (need 2+ distinct insiders on same ticker within 14d).`);
+    console.log(`  Try increasing DAYS_BACK to 14 in .env for a wider look-back.`);
+  }
+
+  // ── Strong individual signals ─────────────────────────────────────────────
+  const strongPurchases = scored.filter((p) => p.signalScore >= 80);
+  if (strongPurchases.length > 0) {
+    console.log(`\n  ── Strong Individual Signals (score ≥ 80) ────────────────────────`);
+    for (const p of strongPurchases) {
       console.log(`\n  ${p.ticker}  ${p.insiderName}  (${p.insiderTitle})`);
       console.log(`  Score: ${p.signalScore}  |  ${p.verdict}`);
       for (const line of p.scoreBreakdown) console.log(`    ${line}`);
@@ -149,7 +187,8 @@ async function main() {
   }
 
   console.log(`\nFetched ${filings.length} Form 4 filings.`);
-  console.log(`Saved to form4-purchases.json.\n`);
+  console.log(`Saved to form4-purchases.json.`);
+  console.log(`Saved to cluster-signals.json.\n`);
 }
 
 main().catch((err) => {

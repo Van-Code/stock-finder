@@ -68,3 +68,21 @@ export interface ScoredPurchase extends InsiderPurchase {
   verdict: string;
   scoreBreakdown: string[];
 }
+
+// ── Cluster signal (aggregated per-ticker view) ───────────────────────────────
+
+export interface ClusterSignal {
+  ticker: string;
+  companyName: string;
+  uniqueInsiders: number;
+  insiderNames: string[];
+  totalPurchaseValue: number;
+  avgPurchaseSize: number;
+  ceoOrCfoBought: boolean;
+  earliestDate: string;
+  latestDate: string;
+  windowDays: number;        // calendar days between first and last purchase
+  clusterScore: number;
+  verdict: string;
+  scoreBreakdown: string[];
+}
