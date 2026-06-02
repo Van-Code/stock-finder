@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { EftsResponse, Form4FilingMeta } from "./types.js";
+import { EftsResponse, Form4FilingMeta, ActivistFilingMeta } from "./types.js";
 
 // ── Yahoo Finance rate limiter (separate from SEC limiter) ───────────────────
 const YF_INTERVAL_MS = 300; // ~3 req/s — polite for unofficial endpoint
@@ -126,6 +126,83 @@ export async function fetchRecentForm4Filings(
       entityName: h._source.entity_name,
       filedAt: h._source.filed_at,
     }));
+}
+
+const ACTIVIST_FORMS = ["SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A"] as const;
+
+/**
+ * Fetch recent SC 13D / 13G filings from EDGAR EFTS.
+ */
+export async function fetchRecentActivistFilings(
+  daysBack = 7,
+  pageSize = 40
+): Promise<ActivistFilingMeta[]> {
+  const end = new Date();
+  const start = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000);
+  const startStr = start.toISOString().slice(0, 10);
+  const endStr = end.toISOString().slice(0, 10);
+
+  const formsParam = ACTIVIST_FORMS.map(encodeURIComponent).join(",");
+  const url =
+    `${EFTS_BASE}?q=%22%22&forms=${formsParam}` +
+    `&dateRange=custom&startdt=${startStr}&enddt=${endStr}` +
+    `&from=0&size=${pageSize}`;
+
+  console.log(`  Querying EDGAR EFTS (13D/13G): ${startStr} → ${endStr}`);
+
+  const res = await rateLimitedFetch(url);
+  const body = (await res.json()) as EftsResponse;
+
+  return (body?.hits?.hits ?? [])
+    .filter((h) => ACTIVIST_FORMS.includes(h._source.form_type as typeof ACTIVIST_FORMS[number]))
+    .map((h) => ({
+      accessionNo: h._source.accession_no,
+      cik: normaliseCik(h._source.entity_id),
+      filerName: h._source.entity_name,
+      filedAt: h._source.filed_at,
+      formType: h._source.form_type,
+    }));
+}
+
+/**
+ * Download the primary document for a 13D/13G filing.
+ * Returns the raw HTML/text content and the public URL, or null on failure.
+ */
+export async function fetchActivistFilingDoc(
+  cik: string,
+  accessionNo: string
+): Promise<{ text: string; filingUrl: string } | null> {
+  const accND = accessionNoDashes(accessionNo);
+  const indexUrl = `${EDGAR_ARCHIVE}/${cik}/${accND}/${accND}-index.htm`;
+
+  let indexHtml: string;
+  try {
+    const res = await rateLimitedFetch(indexUrl, "text/html");
+    indexHtml = await res.text();
+  } catch (err) {
+    console.warn(`    ⚠ Could not fetch index for ${accessionNo}: ${(err as Error).message}`);
+    return null;
+  }
+
+  // Prefer .htm document; fall back to .txt
+  const htmMatch = indexHtml.match(/href="(\/Archives\/edgar\/data\/[^"]+\.htm)"/i);
+  const txtMatch = indexHtml.match(/href="(\/Archives\/edgar\/data\/[^"]+\.txt)"/i);
+  const docPath = (htmMatch ?? txtMatch)?.[1];
+
+  if (!docPath) {
+    console.warn(`    ⚠ No document found in filing index for ${accessionNo}`);
+    return null;
+  }
+
+  const docUrl = `${EDGAR_WWW}${docPath}`;
+  try {
+    const res = await rateLimitedFetch(docUrl, "text/html");
+    const text = await res.text();
+    return { text, filingUrl: docUrl };
+  } catch (err) {
+    console.warn(`    ⚠ Could not fetch doc ${docUrl}: ${(err as Error).message}`);
+    return null;
+  }
 }
 
 /**

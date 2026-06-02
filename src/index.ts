@@ -2,29 +2,32 @@ import "dotenv/config";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { fetchRecentForm4Filings, fetchFilingXml, fetchPriceChange90d } from "./secClient.js";
+import { fetchRecentForm4Filings, fetchFilingXml, fetchPriceChange90d, fetchRecentActivistFilings, fetchActivistFilingDoc } from "./secClient.js";
 import { parseForm4Xml } from "./parser.js";
-import { scoreAllPurchases, buildClusterSignals, PriceChangeMap } from "./scoring.js";
-import { InsiderPurchase, ScoredPurchase } from "./types.js";
+import { parseActivistDoc } from "./activistParser.js";
+import { scoreAllPurchases, buildClusterSignals, scoreActivistFiling, PriceChangeMap } from "./scoring.js";
+import { InsiderPurchase, ScoredPurchase, ActivistSignal } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, "../data");
 const OUTPUT_FILE = path.join(DATA_DIR, "form4-purchases.json");
 const CLUSTER_FILE = path.join(DATA_DIR, "cluster-signals.json");
+const ACTIVIST_FILE = path.join(DATA_DIR, "activist-signals.json");
 
 const DAYS_BACK = parseInt(process.env.DAYS_BACK ?? "2", 10);
+const ACTIVIST_DAYS_BACK = parseInt(process.env.ACTIVIST_DAYS_BACK ?? "7", 10);
 const PAGE_SIZE = Math.min(parseInt(process.env.PAGE_SIZE ?? "40", 10), 40);
 // Set FETCH_PRICE_DATA=false in .env to skip Yahoo Finance price checks
 const FETCH_PRICE_DATA = process.env.FETCH_PRICE_DATA !== "false";
 
 async function main() {
   console.log("═══════════════════════════════════════════════════════");
-  console.log("  SEC Form 4 Insider Signal Scanner");
+  console.log("  SEC Insider Signal Scanner");
   console.log("  Research tool only. Not financial advice.");
   console.log("═══════════════════════════════════════════════════════\n");
 
   // ── 1. Fetch Form 4 filing metadata ───────────────────────────────────────
-  console.log(`[1/4] Fetching recent Form 4 filings (last ${DAYS_BACK} day(s))…`);
+  console.log(`[1/5] Fetching recent Form 4 filings (last ${DAYS_BACK} day(s))…`);
   const filings = await fetchRecentForm4Filings(DAYS_BACK, PAGE_SIZE);
   console.log(`      Found ${filings.length} Form 4 filings.\n`);
 
@@ -34,7 +37,7 @@ async function main() {
   }
 
   // ── 2. Download and parse XML ─────────────────────────────────────────────
-  console.log(`[2/4] Downloading and parsing filing XML…`);
+  console.log(`[2/5] Downloading and parsing filing XML…`);
   const purchases: InsiderPurchase[] = [];
   let parsed = 0;
   let skipped = 0;
@@ -98,7 +101,7 @@ async function main() {
   }
 
   // ── 3. Fetch 90-day price changes ─────────────────────────────────────────
-  console.log(`[3/4] Fetching price data…`);
+  console.log(`[3/5] Fetching price data…`);
   const priceChanges: PriceChangeMap = {};
 
   if (FETCH_PRICE_DATA) {
@@ -118,7 +121,7 @@ async function main() {
   }
 
   // ── 4. Score, cluster, save, display ─────────────────────────────────────
-  console.log(`\n[4/4] Scoring, clustering, and saving…`);
+  console.log(`\n[4/5] Scoring, clustering, and saving…`);
 
   const scored: ScoredPurchase[] = scoreAllPurchases(purchases, priceChanges)
     .sort((a, b) => b.signalScore - a.signalScore);
@@ -186,9 +189,69 @@ async function main() {
     }
   }
 
+  // ── 5. Activist 13D/13G scan ──────────────────────────────────────────────
+  console.log(`\n[5/5] Scanning for activist 13D/13G filings (last ${ACTIVIST_DAYS_BACK} day(s))…`);
+
+  const activistMetas = await fetchRecentActivistFilings(ACTIVIST_DAYS_BACK, PAGE_SIZE);
+  console.log(`      Found ${activistMetas.length} activist filing(s).\n`);
+
+  const activistSignals: ActivistSignal[] = [];
+  let aProcessed = 0;
+  let aSkipped = 0;
+
+  for (const meta of activistMetas) {
+    process.stdout.write(`  [${aProcessed + aSkipped + 1}/${activistMetas.length}] ${meta.accessionNo} (${meta.formType})  `);
+
+    const result = await fetchActivistFilingDoc(meta.cik, meta.accessionNo);
+    if (!result) {
+      process.stdout.write("✗ skipped\n");
+      aSkipped++;
+      continue;
+    }
+
+    const parsed = parseActivistDoc(result.text, meta.formType, meta.filerName);
+    const signal = scoreActivistFiling(meta, parsed, result.filingUrl);
+    activistSignals.push(signal);
+    process.stdout.write(`✓ ${signal.ticker || "?"}  score=${signal.activistScore}\n`);
+    aProcessed++;
+  }
+
+  const sortedActivist = activistSignals.sort((a, b) => b.activistScore - a.activistScore);
+  fs.writeFileSync(ACTIVIST_FILE, JSON.stringify(sortedActivist, null, 2), "utf-8");
+
+  if (sortedActivist.length > 0) {
+    console.log(`\n  ── Activist Watchlist ─────────────────────────────────────────────`);
+    console.table(
+      sortedActivist.map((a) => ({
+        ticker:       a.ticker,
+        company:      a.companyName.slice(0, 24),
+        filer:        a.filerName.slice(0, 24),
+        ownership:    a.ownershipPercent !== null ? `${a.ownershipPercent.toFixed(2)}%` : "N/A",
+        form:         a.formType,
+        score:        a.activistScore,
+        verdict:      a.verdict,
+      }))
+    );
+
+    const strongActivist = sortedActivist.filter((a) => a.activistScore >= 60);
+    if (strongActivist.length > 0) {
+      console.log(`\n  ── Notable Activist Positions (score ≥ 60) ───────────────────────`);
+      for (const a of strongActivist) {
+        console.log(`\n  ${a.ticker}  ${a.companyName}`);
+        console.log(`  Filer: ${a.filerName}  |  Form: ${a.formType}  |  Filed: ${a.filingDate}`);
+        console.log(`  Score: ${a.activistScore}  |  ${a.verdict}`);
+        for (const line of a.scoreBreakdown) console.log(`    ${line}`);
+        console.log(`  Filing: ${a.filingUrl}`);
+      }
+    }
+  } else {
+    console.log(`\n  No activist filings found. Try increasing ACTIVIST_DAYS_BACK in .env.`);
+  }
+
   console.log(`\nFetched ${filings.length} Form 4 filings.`);
   console.log(`Saved to form4-purchases.json.`);
-  console.log(`Saved to cluster-signals.json.\n`);
+  console.log(`Saved to cluster-signals.json.`);
+  console.log(`Saved to activist-signals.json.\n`);
 }
 
 main().catch((err) => {

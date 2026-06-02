@@ -69,6 +69,39 @@ export interface ScoredPurchase extends InsiderPurchase {
   scoreBreakdown: string[];
 }
 
+// ── Activist / 13D / 13G signal ──────────────────────────────────────────────
+
+export interface ActivistFilingMeta {
+  accessionNo: string;
+  cik: string;          // filer (activist) CIK
+  filerName: string;    // entity_name from EFTS — the reporting person
+  filedAt: string;
+  formType: string;     // SC 13D | SC 13D/A | SC 13G | SC 13G/A
+}
+
+export interface ParsedActivistDoc {
+  subjectCompanyName: string;
+  ticker: string;
+  ownershipPercent: number | null;
+  previousOwnershipPercent: number | null; // from amendment text if detectable
+  isIncreasingStake: boolean;
+  activistKeywordsFound: string[];
+  rawText: string;
+}
+
+export interface ActivistSignal {
+  ticker: string;
+  companyName: string;
+  filerName: string;
+  ownershipPercent: number | null;
+  filingDate: string;
+  filingUrl: string;
+  formType: string;
+  activistScore: number;
+  verdict: string;
+  scoreBreakdown: string[];
+}
+
 // ── Cluster signal (aggregated per-ticker view) ───────────────────────────────
 
 export interface ClusterSignal {

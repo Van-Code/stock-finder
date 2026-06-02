@@ -1,4 +1,4 @@
-import { InsiderPurchase, ScoredPurchase, ClusterSignal } from "./types.js";
+import { InsiderPurchase, ScoredPurchase, ClusterSignal, ActivistSignal, ParsedActivistDoc, ActivistFilingMeta } from "./types.js";
 
 // Fractional price change over 90 days, e.g. -0.25 = fell 25%. null = unavailable.
 export type PriceChangeMap = Record<string, number | null>;
@@ -257,4 +257,69 @@ export function buildClusterSignals(
   }
 
   return clusters.sort((a, b) => b.clusterScore - a.clusterScore);
+}
+
+// ── Activist signal scoring ───────────────────────────────────────────────────
+
+export function scoreActivistFiling(
+  meta: ActivistFilingMeta,
+  doc: ParsedActivistDoc,
+  filingUrl: string
+): ActivistSignal {
+  const breakdown: string[] = [];
+  let score = 0;
+
+  // New SC 13D is the strongest signal — declares intent to influence
+  if (meta.formType === "SC 13D") {
+    score += 40;
+    breakdown.push("+40  new SC 13D filing");
+  } else if (meta.formType === "SC 13D/A") {
+    score += 20;
+    breakdown.push("+20  SC 13D/A amendment");
+    if (doc.isIncreasingStake) {
+      score += 25;
+      breakdown.push("+25  increasing stake detected");
+    }
+  } else if (meta.formType === "SC 13G") {
+    score += 15;
+    breakdown.push("+15  new SC 13G (passive ownership)");
+  } else if (meta.formType === "SC 13G/A") {
+    score += 10;
+    breakdown.push("+10  SC 13G/A amendment");
+    if (doc.isIncreasingStake) {
+      score += 25;
+      breakdown.push("+25  increasing stake detected");
+    }
+  }
+
+  // Ownership thresholds (cumulative)
+  if (doc.ownershipPercent !== null) {
+    if (doc.ownershipPercent > 10) {
+      score += 30;
+      breakdown.push(`+30  ownership > 10% (${doc.ownershipPercent.toFixed(2)}%)`);
+    }
+    if (doc.ownershipPercent > 5) {
+      score += 20;
+      breakdown.push(`+20  ownership > 5%`);
+    }
+  }
+
+  // Activist keywords in filer name or filing text
+  if (doc.activistKeywordsFound.length > 0) {
+    score += 15;
+    breakdown.push(`+15  activist keywords: ${doc.activistKeywordsFound.slice(0, 3).join(", ")}`);
+  }
+
+  return {
+    ticker: doc.ticker || "N/A",
+    companyName: doc.subjectCompanyName || meta.filerName,
+    filerName: meta.filerName,
+    ownershipPercent: doc.ownershipPercent,
+    filingDate: meta.filedAt.slice(0, 10),
+    filingUrl,
+    formType: meta.formType,
+    activistScore: score,
+    verdict: verdict(score),
+    scoreBreakdown: breakdown,
+  };
 }
