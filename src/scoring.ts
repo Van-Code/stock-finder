@@ -1,4 +1,4 @@
-import { InsiderPurchase, ScoredPurchase } from "./types.js";
+import { InsiderPurchase, ScoredPurchase, ClusterSignal } from "./types.js";
 
 // Fractional price change over 90 days, e.g. -0.25 = fell 25%. null = unavailable.
 export type PriceChangeMap = Record<string, number | null>;
@@ -132,4 +132,129 @@ export function scoreAllPurchases(
 
     return { ...p, signalScore: score, verdict: verdict(score), scoreBreakdown: breakdown };
   });
+}
+
+// ── Cluster signals ───────────────────────────────────────────────────────────
+
+function clusterScore(
+  uniqueInsiders: number,
+  totalPurchaseValue: number,
+  ceoOrCfoBought: boolean,
+  windowDays: number,
+  priceChange90d: number | null
+): { score: number; breakdown: string[] } {
+  const breakdown: string[] = [];
+  let score = 0;
+
+  // Conviction grows with each independent buyer
+  score += uniqueInsiders * 20;
+  breakdown.push(`+${uniqueInsiders * 20}  ${uniqueInsiders} unique insider(s) × 20`);
+
+  // Aggregate value tiers (cumulative, same philosophy as per-purchase scoring)
+  if (totalPurchaseValue > 1_000_000) {
+    score += 30;
+    breakdown.push("+30  total > $1M");
+  }
+  if (totalPurchaseValue > 500_000) {
+    score += 20;
+    breakdown.push("+20  total > $500k");
+  }
+  if (totalPurchaseValue > 100_000) {
+    score += 15;
+    breakdown.push("+15  total > $100k");
+  }
+
+  if (ceoOrCfoBought) {
+    score += 25;
+    breakdown.push("+25  CEO or CFO participated");
+  }
+
+  // Purchases clustered tightly (all within a week) raise conviction further
+  if (uniqueInsiders >= 2 && windowDays <= 7) {
+    score += 10;
+    breakdown.push("+10  all purchases within 7 days");
+  }
+
+  // Price-momentum bonus (same threshold as per-purchase)
+  if (priceChange90d !== null && priceChange90d < -0.2) {
+    score += 20;
+    breakdown.push(`+20  stock fell ${(priceChange90d * 100).toFixed(1)}% in prior 90d`);
+  }
+
+  return { score, breakdown };
+}
+
+/**
+ * Group purchases by ticker, keep only tickers with 2+ distinct insiders whose
+ * transactions all fall within a 14-day window, then score each cluster.
+ * Returns clusters sorted by clusterScore descending.
+ */
+export function buildClusterSignals(
+  purchases: InsiderPurchase[],
+  priceChanges: PriceChangeMap
+): ClusterSignal[] {
+  const WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+  // Group by ticker
+  const byTicker = new Map<string, InsiderPurchase[]>();
+  for (const p of purchases) {
+    if (p.ticker === "N/A") continue;
+    const arr = byTicker.get(p.ticker) ?? [];
+    arr.push(p);
+    byTicker.set(p.ticker, arr);
+  }
+
+  const clusters: ClusterSignal[] = [];
+
+  for (const [ticker, txns] of byTicker) {
+    // Require 2+ distinct insiders
+    const uniqueNames = [...new Set(txns.map((p) => p.insiderName))];
+    if (uniqueNames.length < 2) continue;
+
+    // All transactions must fall within the 14-day window
+    const timestamps = txns
+      .map((p) => new Date(p.transactionDate).getTime())
+      .filter((t) => !isNaN(t));
+    if (timestamps.length < 2) continue;
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+    if (maxTs - minTs > WINDOW_MS) continue;
+
+    const windowDays = Math.round((maxTs - minTs) / (24 * 60 * 60 * 1000));
+    const totalPurchaseValue = txns.reduce((sum, p) => sum + p.totalValue, 0);
+    const avgPurchaseSize = Math.round(totalPurchaseValue / txns.length);
+
+    const ceoOrCfoBought = txns.some((p) =>
+      titleIs(p.insiderTitle, "chief executive", "ceo", "chief financial", "cfo")
+    );
+
+    const toDate = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+    const companyName = txns[0].companyName;
+
+    const { score, breakdown } = clusterScore(
+      uniqueNames.length,
+      totalPurchaseValue,
+      ceoOrCfoBought,
+      windowDays,
+      priceChanges[ticker] ?? null
+    );
+
+    clusters.push({
+      ticker,
+      companyName,
+      uniqueInsiders: uniqueNames.length,
+      insiderNames: uniqueNames,
+      totalPurchaseValue: Math.round(totalPurchaseValue * 100) / 100,
+      avgPurchaseSize,
+      ceoOrCfoBought,
+      earliestDate: toDate(minTs),
+      latestDate: toDate(maxTs),
+      windowDays,
+      clusterScore: score,
+      verdict: verdict(score),
+      scoreBreakdown: breakdown,
+    });
+  }
+
+  return clusters.sort((a, b) => b.clusterScore - a.clusterScore);
 }
